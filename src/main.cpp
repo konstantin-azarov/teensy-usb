@@ -118,7 +118,9 @@ class Endpoint {
         descriptor_buffer.releaseTransferDescriptor(head_dtd_);
         head_dtd_ = (EndpointTransferDescriptor*)((uint32_t)tmp & 0xFFFFFFE0);
 
-        func(len);
+        if (func != nullptr) {
+          func(len);
+        }
       }
       
       if (head_dtd_ == nullptr) {
@@ -160,17 +162,18 @@ class Endpoint {
       head_->next_dtd = dtd;
       head_->status = 0;
 
-      int prime_bit = primeBit_();
-      Serial.println("Priming ");
-      Serial.println(prime_bit, HEX);
-      Serial.println(dtd->token, HEX);
-      Serial.println((uint32_t)dtd->buffer_ptr, HEX);
-      Serial.println((uint32_t)dtd->buffer_pointers[0], HEX);
-      Serial.println((uint32_t)dtd->buffer_pointers[1], HEX);
-      Serial.println((uint32_t)dtd->buffer_pointers[2], HEX);
-      Serial.println((uint32_t)dtd->buffer_pointers[3], HEX);
-      Serial.println((uint32_t)head_->next_dtd, HEX);
-      Serial.println(USBHS_EPPRIME & prime_bit, HEX);
+      uint32_t prime_bit = primeBit_();
+      Serial.print("Priming ");
+      Serial.println(id_);
+      /* Serial.println(prime_bit, HEX); */
+      /* Serial.println(dtd->token, HEX); */
+      /* Serial.println((uint32_t)dtd->buffer_ptr, HEX); */
+      /* Serial.println((uint32_t)dtd->buffer_pointers[0], HEX); */
+      /* Serial.println((uint32_t)dtd->buffer_pointers[1], HEX); */
+      /* Serial.println((uint32_t)dtd->buffer_pointers[2], HEX); */
+      /* Serial.println((uint32_t)dtd->buffer_pointers[3], HEX); */
+      /* Serial.println((uint32_t)head_->next_dtd, HEX); */
+      /* Serial.println(USBHS_EPPRIME & prime_bit, HEX); */
       USBHS_EPPRIME |= prime_bit; 
       while (USBHS_EPPRIME & prime_bit);
       if ((USBHS_EPSR & prime_bit) == 0) {
@@ -186,7 +189,7 @@ class Endpoint {
     }
 
   private:
-    uint8_t primeBit_() {
+    uint32_t primeBit_() {
       return 1 << (id_/2 + (id_%2) * 16);
     }
 
@@ -438,6 +441,7 @@ EndpointTransferDescriptor* usbHsHandleGetDescriptor(UsbSetupData* setup) {
 }
 
 void usbHsHandleSetAddress(uint8_t address) {
+  USBHS_DEVICEADDR = (address << 25) + (1 << 24);
   usbHsControlWriteStatus(0);
 }
 
