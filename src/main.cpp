@@ -165,15 +165,15 @@ class Endpoint {
       uint32_t prime_bit = primeBit_();
       Serial.print("Priming ");
       Serial.println(id_);
-      /* Serial.println(prime_bit, HEX); */
-      /* Serial.println(dtd->token, HEX); */
-      /* Serial.println((uint32_t)dtd->buffer_ptr, HEX); */
-      /* Serial.println((uint32_t)dtd->buffer_pointers[0], HEX); */
-      /* Serial.println((uint32_t)dtd->buffer_pointers[1], HEX); */
-      /* Serial.println((uint32_t)dtd->buffer_pointers[2], HEX); */
-      /* Serial.println((uint32_t)dtd->buffer_pointers[3], HEX); */
-      /* Serial.println((uint32_t)head_->next_dtd, HEX); */
-      /* Serial.println(USBHS_EPPRIME & prime_bit, HEX); */
+      Serial.println(prime_bit, HEX);
+      Serial.println(dtd->token, HEX);
+      Serial.println((uint32_t)dtd->buffer_ptr, HEX);
+      Serial.println((uint32_t)dtd->buffer_pointers[0], HEX);
+      Serial.println((uint32_t)dtd->buffer_pointers[1], HEX);
+      Serial.println((uint32_t)dtd->buffer_pointers[2], HEX);
+      Serial.println((uint32_t)dtd->buffer_pointers[3], HEX);
+      Serial.println((uint32_t)head_->next_dtd, HEX);
+      Serial.println(USBHS_EPPRIME & prime_bit, HEX);
       USBHS_EPPRIME |= prime_bit; 
       while (USBHS_EPPRIME & prime_bit);
       if ((USBHS_EPSR & prime_bit) == 0) {
@@ -413,23 +413,89 @@ UsbDeviceDescriptor device_descriptor = {
   0xFEED,
   0xBEEF,
   0x0001,
-  0,
   1,
   2,
+  3,
   1
 };
 
-void usbHsSendDeviceDescriptor() {
-  usbHsControlReadSendData(&device_descriptor, sizeof(UsbDeviceDescriptor));
+struct Configuration {
+  UsbConfigurationDescriptor config;
+  UsbInterfaceDescriptor interface;
+} __attribute__((packed)); 
+
+Configuration config = {
+  // configuration
+  {
+    sizeof(UsbConfigurationDescriptor), // bLength
+    USB_DESC_CONFIGURATION, // bDescriptorType
+    sizeof(UsbConfigurationDescriptor) + sizeof(UsbInterfaceDescriptor), // wTotalLength
+    1, // bNumInterfaces
+    1, // bConfigurationValue
+    4, // iConfiguration
+    0, // bmAttributes
+    100 // bMaxPower
+  },
+  // interface
+  {
+    sizeof(UsbInterfaceDescriptor),
+    USB_DESC_INTERFACE,
+    0,
+    0,
+    0,
+    0xFF,
+    0,
+    0,
+    0
+  }
+};
+
+const char16_t* string_descs[] = {
+  u"\u0409",
+  u"Test, inc.",
+  u"USB test",
+  u"0.1",
+  u"Default configuration"
+};
+char16_t string_desc_buffer[64];
+
+int wcslen(const char16_t* str) {
+  int len = 0;
+  while (*(str++)) {
+    len++;
+  }
+  return len;
+}
+
+void sendStringDescriptor(const char16_t* str) {
+  int l = wcslen(str) * sizeof(char16_t);
+  string_desc_buffer[0] = (l + 2) | (USB_DESC_STRING << 8);
+  char16_t* res = &string_desc_buffer[1];
+  while (*str) {
+    *res = *str;
+    res++;
+    str++;
+  }
+  usbHsControlReadSendData(string_desc_buffer, l + 2);
 }
 
 EndpointTransferDescriptor* usbHsHandleGetDescriptor(UsbSetupData* setup) {
   uint8_t desc_type = setup->wValue >> 8;
-//  uint8_t desc_index = setup->wValue & 0xFF;
+  uint8_t desc_index = setup->wValue & 0xFF;
 
   switch (desc_type) {
     case USB_DESC_DEVICE:
-      usbHsSendDeviceDescriptor();
+      Serial.println("Device descriptor");
+      usbHsControlReadSendData(&device_descriptor, sizeof(UsbDeviceDescriptor));
+      break;
+    case USB_DESC_CONFIGURATION:
+      Serial.println("Configuration descriptor_buffer");
+      usbHsControlReadSendData(&config, min(sizeof(config), setup->wLength));
+      break;
+    case USB_DESC_STRING:
+      Serial.print("String descriptor: ");
+      Serial.println(desc_index);
+      sendStringDescriptor(string_descs[desc_index]);
       break;
     default:
       Serial.print("Unsupported descriptor request: ");
@@ -452,6 +518,14 @@ void usbHsHandleControlSetup(UsbSetupData* setup) {
       break;
     case USB_REQ_SET_ADDRESS:
       usbHsHandleSetAddress(setup->wValue);
+      break;
+    case USB_REQ_SET_CONFIGURATION:
+      Serial.print("Set configuration: ");
+      Serial.println(setup->wValue);
+      if (setup->wValue != 0) {
+        // set configuration
+      }
+      usbHsControlWriteStatus(0);
       break;
     default:
       Serial.print("Unsupported request: ");
