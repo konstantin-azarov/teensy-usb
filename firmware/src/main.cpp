@@ -78,14 +78,33 @@ class TransferDescriptorBuffer {
 
 TransferDescriptorBuffer<10> descriptor_buffer;
 
+enum class EndpointType {
+  CONTROL = 0,
+  ISOCHRONOUS = 1,
+  BULK = 2,
+  INTERRUPT = 3
+};
+
 class Endpoint {
   public:
     Endpoint(uint8_t id, EndpointQueueHead* head) : id_(id), head_(head) {
     }
 
-    void setup(bool zlc, uint16_t max_packet_length, bool ios) {
+    void init(bool zlc, uint16_t max_packet_length, EndpointType type) {
+      if (id_ <= 1 && type != EndpointType::CONTROL) {
+        Serial.println("Invalid endpoint type");
+      }
+
+      bool ios = type == EndpointType::CONTROL && (id_ % 2) == 0;
+
       head_->cap = (zlc << 29) | (max_packet_length << 16) | (ios << 15);
-      reset();
+     
+      if (id_ > 1) {
+        uint8_t shift = id_ % 2 ? 16 : 0;
+        volatile uint32_t* reg = (volatile uint32_t*)(0x400A11C0 + (id_/2)*4);
+         *reg = ((*reg) & ~(0xFF << shift)) | 
+          (((static_cast<int>(type) << 2) | (1 << 7)) << shift);
+      }
     }
 
     void reset() {
@@ -163,24 +182,24 @@ class Endpoint {
       head_->status = 0;
 
       uint32_t prime_bit = primeBit_();
-      Serial.print("Priming ");
-      Serial.println(id_);
-      Serial.println(prime_bit, HEX);
-      Serial.println(dtd->token, HEX);
-      Serial.println((uint32_t)dtd->buffer_ptr, HEX);
-      Serial.println((uint32_t)dtd->buffer_pointers[0], HEX);
-      Serial.println((uint32_t)dtd->buffer_pointers[1], HEX);
-      Serial.println((uint32_t)dtd->buffer_pointers[2], HEX);
-      Serial.println((uint32_t)dtd->buffer_pointers[3], HEX);
-      Serial.println((uint32_t)head_->next_dtd, HEX);
-      Serial.println(USBHS_EPPRIME & prime_bit, HEX);
+      /* Serial.print("Priming "); */
+      /* Serial.println(id_); */
+      /* Serial.println(prime_bit, HEX); */
+      /* Serial.println(dtd->token, HEX); */
+      /* Serial.println((uint32_t)dtd->buffer_ptr, HEX); */
+      /* Serial.println((uint32_t)dtd->buffer_pointers[0], HEX); */
+      /* Serial.println((uint32_t)dtd->buffer_pointers[1], HEX); */
+      /* Serial.println((uint32_t)dtd->buffer_pointers[2], HEX); */
+      /* Serial.println((uint32_t)dtd->buffer_pointers[3], HEX); */
+      /* Serial.println((uint32_t)head_->next_dtd, HEX); */
+      /* Serial.println(USBHS_EPPRIME & prime_bit, HEX); */
       USBHS_EPPRIME |= prime_bit; 
       while (USBHS_EPPRIME & prime_bit);
       if ((USBHS_EPSR & prime_bit) == 0) {
         Serial.println("Error priming");
         return false;
       }
-      Serial.println("Priming successful");
+      /* Serial.println("Priming successful"); */
       /* Serial.println((uint32_t)qh->current_dtd, HEX); */
       /* Serial.println((uint32_t)qh->next_dtd, HEX); */
       /* Serial.println((uint32_t)qh->status, HEX); */
@@ -215,8 +234,8 @@ class ControlPipe {
     }
 
     void setup() {
-      rx()->setup(false, 64, true);
-      tx()->setup(false, 64, false);
+      rx()->init(false, 64, EndpointType::CONTROL);
+      tx()->init(false, 64, EndpointType::CONTROL);
     }
 
     void onSetup() {
@@ -422,6 +441,7 @@ UsbDeviceDescriptor device_descriptor = {
 struct Configuration {
   UsbConfigurationDescriptor config;
   UsbInterfaceDescriptor interface;
+  UsbEndpointDescriptor endpoint;
 } __attribute__((packed)); 
 
 Configuration config = {
@@ -429,24 +449,34 @@ Configuration config = {
   {
     sizeof(UsbConfigurationDescriptor), // bLength
     USB_DESC_CONFIGURATION, // bDescriptorType
-    sizeof(UsbConfigurationDescriptor) + sizeof(UsbInterfaceDescriptor), // wTotalLength
+    sizeof(UsbConfigurationDescriptor) + 
+      sizeof(UsbInterfaceDescriptor) + sizeof(UsbEndpointDescriptor), // wTotalLength
     1, // bNumInterfaces
     1, // bConfigurationValue
     4, // iConfiguration
-    0, // bmAttributes
+    0xC0, // bmAttributes
     100 // bMaxPower
   },
   // interface
   {
-    sizeof(UsbInterfaceDescriptor),
-    USB_DESC_INTERFACE,
-    0,
-    0,
-    0,
-    0xFF,
-    0,
-    0,
-    0
+    sizeof(UsbInterfaceDescriptor), // bLength
+    USB_DESC_INTERFACE, // bDescriptorType
+    0, // bInterfaceNumber
+    0, // bAlternateSetting
+    1, // bNumEndpoints
+    0xFF, // bInterfaceClass
+    0, // bInterfaceSubclass
+    0, // bInterfaceProtocol
+    0  // iInterface
+  },
+  // endpoint
+  {
+  sizeof(UsbEndpointDescriptor), // bLength
+  USB_DESC_ENDPOINT, // bDescriptorType
+  0x81, // bEndpointAddress (1-IN)
+  0x2, // bmAttributes (Bulk endpoint)
+  512, // wMaxPacketSize
+  0, // bInterval
   }
 };
 
@@ -511,25 +541,48 @@ void usbHsHandleSetAddress(uint8_t address) {
   usbHsControlWriteStatus(0);
 }
 
+uint8_t bulk_data[256];
+
 void usbHsHandleControlSetup(UsbSetupData* setup) {
-  switch (setup->bRequest) {
-    case USB_REQ_GET_DESCRIPTOR:
-      usbHsHandleGetDescriptor(setup);
-      break;
-    case USB_REQ_SET_ADDRESS:
-      usbHsHandleSetAddress(setup->wValue);
-      break;
-    case USB_REQ_SET_CONFIGURATION:
-      Serial.print("Set configuration: ");
-      Serial.println(setup->wValue);
-      if (setup->wValue != 0) {
-        // set configuration
+  uint8_t request_type = (setup->bmRequestType >> 5) & 3;
+  switch (request_type) {
+    case USB_REQ_TYPE_STANDARD:
+      switch (setup->bRequest) {
+        case USB_REQ_GET_DESCRIPTOR:
+          usbHsHandleGetDescriptor(setup);
+          break;
+        case USB_REQ_SET_ADDRESS:
+          usbHsHandleSetAddress(setup->wValue);
+          break;
+        case USB_REQ_SET_CONFIGURATION:
+          Serial.print("Set configuration: ");
+          Serial.println(setup->wValue);
+          if (setup->wValue != 0) {
+            // set configuration
+            endpoints[3].init(false, 512, EndpointType::BULK);
+          }
+          usbHsControlWriteStatus(0);
+          break;
+        default:
+          Serial.print("Unsupported request: ");
+          Serial.println(setup->bRequest);
+          break;
       }
-      usbHsControlWriteStatus(0);
       break;
-    default:
-      Serial.print("Unsupported request: ");
-      Serial.println(setup->bRequest);
+    case USB_REQ_TYPE_VENDOR:
+      if (setup->bRequest == 42) {
+        Serial.println("Start transfer");
+
+        for (int i=0; i < 256; ++i) {
+          bulk_data[i] = i;
+        }
+        endpoints[3].enqueueTransfer(bulk_data, 256, nullptr);
+
+        usbHsControlWriteStatus(0);
+      } else {
+        Serial.print("Vendor request: ");
+        Serial.println(setup->bRequest);
+      }
       break;
   }
 }
@@ -554,8 +607,8 @@ extern "C" void usbhs_isr(void) {
   if (status & USBHS_USBSTS_UI) {
     /* Serial.print("EPSETUPSR: "); */
     /* printBin(setup); */
-    /* Serial.print("EPCOMPLETE: "); */
-    /* printBin(complete); */
+    Serial.print("EPCOMPLETE: ");
+    printBin(complete);
 
     if (setup & 1) {
       default_control_pipe.onSetup();
@@ -611,17 +664,5 @@ void loop() {
   delay(200);
   digitalWrite(13, LOW);
   delay(800);
-
-  Serial.println("EP cap:");
-  Serial.println(endpoint_queue_heads[0].cap, HEX);
-
-  /* Serial.print("HEAD status: "); */
-  /* Serial.println(endpoints.headsPtr()[1].status, HEX); */
-  /* Serial.println((uint32_t)endpoints.headsPtr()[1].current_dtd, HEX); */
-  /* Serial.println((uint32_t)endpoints.headsPtr()[1].next_dtd, HEX); */
-  /* Serial.print("EPSR: "); */
-  /* Serial.println(USBHS_EPSR, HEX); */
-  /* Serial.print("EPCOMPLETE: "); */
-  /* Serial.println(USBHS_EPCOMPLETE, HEX); */
 }
 

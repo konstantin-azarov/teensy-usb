@@ -1,6 +1,12 @@
 #ifndef __USB_TYPES__HPP__
 #define __USB_TYPES__HPP__
 
+enum UsbRequestType {
+  USB_REQ_TYPE_STANDARD = 0,
+  USB_REQ_TYPE_CLASS = 1,
+  USB_REQ_TYPE_VENDOR = 2
+};
+
 enum UsbRequestCode {
   USB_REQ_GET_STATUS = 0,
   USB_REQ_CLEAR_FEATURE = 1,
