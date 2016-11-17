@@ -1,6 +1,7 @@
 #include <iostream>
 
 #include <libusb-1.0/libusb.h>
+#include <chrono>
 
 #define libUsbSafeCall(x) {  \
   int __call_res = x; \
@@ -12,6 +13,8 @@
 
 const uint16_t kVendorId = 0xFEED;
 const uint16_t kProductId = 0xBEEF;
+
+using namespace std::chrono;
 
 int main() {
   libusb_context* context;
@@ -25,33 +28,45 @@ int main() {
     return 1;
   }
 
+  const uint32_t kBytes = 5*1024*1024;
+
+  bool ok = true;
+
+  for (int t = 0; t < 5; ++t) {
+  auto t0 = high_resolution_clock::now();
+
   libUsbSafeCall(libusb_control_transfer(
         handle,
         (2 << 5), // vendor request
         42,
         0,
         0,
-        nullptr,
-        0,
+        (uint8_t*)&kBytes,
+        sizeof(kBytes),
         1000));
 
-  uint8_t data[256];
+  uint8_t data[kBytes];
   int transferred;
 
   libUsbSafeCall(libusb_bulk_transfer(
         handle,
         0x81,
         data,
-        256,
+        kBytes,
         &transferred,
         1000));
 
-  std::cout << "Transferred: " << transferred << std::endl;
+  auto t1 = high_resolution_clock::now();
 
-  bool ok = transferred == 256;
-  for (int i=0; i < 256 && ok; ++i) {
-    if (data[i] != i) {
-      std::cout << "Data mismatch" << std::endl;
+  float dt = duration_cast<milliseconds>(t1 - t0).count()/1000.0;
+
+  std::cout << "Transferred: " << transferred << " bytes in " 
+    << dt  << " seconds (" << transferred/dt/1024/1204 << "MB/sec)" << std::endl;
+
+  bool ok = transferred == kBytes;
+  for (int i=0; i < kBytes && ok; ++i) {
+    if (data[i] != (uint8_t)i) {
+      std::cout << "Data mismatch:" << i << " != " << (int)data[i] << std::endl;
       ok = false;
     }
   }
@@ -59,6 +74,8 @@ int main() {
   if (ok) {
     std::cout << "OK" << std::endl;
   }
+
+  } 
 
   libusb_close(handle);
 

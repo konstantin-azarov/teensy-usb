@@ -6,12 +6,13 @@ struct EndpointTransferDescriptor;
 
 struct TransferRecord {
   uint32_t length;
-  void (*completion_callback)(uint32_t length);
+  void* data;
+  void (*completion_callback)(uint32_t length, void* data);
 };
 
 struct EndpointTransferDescriptor {
   EndpointTransferDescriptor* next_dtd;
-  uint32_t token;
+  volatile uint32_t token;
   void* buffer_ptr;
   uint32_t buffer_pointers[4];
   TransferRecord* record;  
@@ -19,9 +20,9 @@ struct EndpointTransferDescriptor {
 
 struct EndpointQueueHead {
   uint32_t cap;
-  EndpointTransferDescriptor* current_dtd;
+  volatile EndpointTransferDescriptor* current_dtd;
   EndpointTransferDescriptor* next_dtd;
-  uint32_t status;
+  volatile uint32_t status;
   uint32_t overlay[6];
   uint32_t setup_buffer[4];
 } __attribute__ ((aligned(64)));
@@ -40,13 +41,19 @@ class TransferDescriptorBuffer {
     }
 
     EndpointTransferDescriptor* allocateTransferDescriptor(
-        void* buffer, uint32_t length, void (*completion_callback)(uint32_t)) {
+        void* buffer, uint32_t length, 
+        void (*completion_callback)(uint32_t, void*),
+        void* user_data) {
+
+      __disable_irq();
       if (freelist_head_ == 0) {
+        __enable_irq();
         return 0;
       }
 
       EndpointTransferDescriptor* res = freelist_head_;
       freelist_head_ = freelist_head_->next_dtd;
+      __enable_irq();
 
       res->next_dtd = (EndpointTransferDescriptor*)1;
       res->token = (length << 16) | (1 << 15) | (1 << 7);
@@ -54,6 +61,7 @@ class TransferDescriptorBuffer {
       res->buffer_ptr = buffer;
       res->record->length = length;
       res->record->completion_callback = completion_callback;
+      res->record->data = user_data;
 
       uint32_t page = ((uint32_t)res->buffer_ptr) & 0xFFFFF000;
       for (int i = 0; i < 4; ++i) {
@@ -65,6 +73,7 @@ class TransferDescriptorBuffer {
     }
 
     void releaseTransferDescriptor(EndpointTransferDescriptor* desc) {
+      // This only happens inside the IRQ handler, so it cannot be preempted
       desc->next_dtd = freelist_head_;
       freelist_head_ = desc;
     }
@@ -76,7 +85,7 @@ class TransferDescriptorBuffer {
     EndpointTransferDescriptor* freelist_head_;
 } __attribute__((aligned(4096)));
 
-TransferDescriptorBuffer<10> descriptor_buffer;
+TransferDescriptorBuffer<32> descriptor_buffer;
 
 enum class EndpointType {
   CONTROL = 0,
@@ -107,6 +116,7 @@ class Endpoint {
       }
     }
 
+    // This should only be called from the IRQ context
     void reset() {
       if (head_dtd_ != nullptr) {
         uint8_t bit = primeBit_();
@@ -126,22 +136,24 @@ class Endpoint {
       }
     }
 
+    // This only happens inside the IRQ handler, so it cannot be preempted
     void onComplete() {
-      while (head_dtd_ != 0 && 
+      while (head_dtd_ != nullptr && 
           (head_dtd_->token & 0x80) == 0) {
         uint32_t rem = ((head_dtd_->token >> 16) & 0x7FFF) ;
         uint32_t len = head_dtd_->record->length - rem;
         auto func = head_dtd_->record->completion_callback;
+        void* user_data = head_dtd_->record->data;
 
         auto* tmp = head_dtd_->next_dtd;
         descriptor_buffer.releaseTransferDescriptor(head_dtd_);
         head_dtd_ = (EndpointTransferDescriptor*)((uint32_t)tmp & 0xFFFFFFE0);
 
         if (func != nullptr) {
-          func(len);
+          func(len, user_data);
         }
       }
-      
+
       if (head_dtd_ == nullptr) {
         tail_dtd_ = nullptr;
       }
@@ -166,10 +178,18 @@ class Endpoint {
     }
 
     bool enqueueTransfer(
-        void* buffer, uint32_t length, void (*completion_callback)(uint32_t)) {
+        void* buffer, uint32_t length, 
+        void (*completion_callback)(uint32_t, void*), void* user_data) {
 
       auto dtd = descriptor_buffer.allocateTransferDescriptor(
-        buffer, length, completion_callback);
+        buffer, length, completion_callback, user_data);
+
+      if (dtd == nullptr) {
+        return false;
+      }
+
+      __disable_irq();
+      bool was_empty = tail_dtd_ == nullptr;
 
       if (tail_dtd_ != nullptr) {
         tail_dtd_->next_dtd = dtd;
@@ -177,32 +197,40 @@ class Endpoint {
       } else {
         head_dtd_ = tail_dtd_ = dtd;
       }
+      __enable_irq();
 
+      // Execute the transfer descriptor (54.5.3.5.3)
+      uint32_t prime_bit = primeBit_();
+
+      if (!was_empty) {
+        // A tranport was already in progress, so maybe we don't have to do
+        // anything.
+        if (USBHS_EPPRIME & prime_bit) {
+          return true;
+        } else {
+          uint32_t status;
+          do {
+            USBHS_USBCMD |= USBHS_USBCMD_ATDTW;
+            status = USBHS_EPSR & prime_bit;
+          } while ((USBHS_USBCMD & USBHS_USBCMD_ATDTW) == 0);
+          USBHS_USBCMD &= ~USBHS_USBCMD_ATDTW;
+          if (status) {
+            return true;
+          }
+          // USBHS already released the last dtd, so we are back to case 1.
+        }
+      }
+
+      // Case 1 - the list is empty, need to prime from scratch
       head_->next_dtd = dtd;
       head_->status = 0;
-
-      uint32_t prime_bit = primeBit_();
-      /* Serial.print("Priming "); */
-      /* Serial.println(id_); */
-      /* Serial.println(prime_bit, HEX); */
-      /* Serial.println(dtd->token, HEX); */
-      /* Serial.println((uint32_t)dtd->buffer_ptr, HEX); */
-      /* Serial.println((uint32_t)dtd->buffer_pointers[0], HEX); */
-      /* Serial.println((uint32_t)dtd->buffer_pointers[1], HEX); */
-      /* Serial.println((uint32_t)dtd->buffer_pointers[2], HEX); */
-      /* Serial.println((uint32_t)dtd->buffer_pointers[3], HEX); */
-      /* Serial.println((uint32_t)head_->next_dtd, HEX); */
-      /* Serial.println(USBHS_EPPRIME & prime_bit, HEX); */
+      
       USBHS_EPPRIME |= prime_bit; 
       while (USBHS_EPPRIME & prime_bit);
       if ((USBHS_EPSR & prime_bit) == 0) {
         Serial.println("Error priming");
         return false;
       }
-      /* Serial.println("Priming successful"); */
-      /* Serial.println((uint32_t)qh->current_dtd, HEX); */
-      /* Serial.println((uint32_t)qh->next_dtd, HEX); */
-      /* Serial.println((uint32_t)qh->status, HEX); */
 
       return true;
     }
@@ -215,6 +243,7 @@ class Endpoint {
   private:
     uint8_t id_;
     EndpointQueueHead* head_;
+    // Does this need to be volatile? Probably not.
     EndpointTransferDescriptor *head_dtd_, *tail_dtd_;
 };
 
@@ -408,17 +437,28 @@ void usbHsReset() {
   }
 }
 
-void usbHsControlReadStatus(uint32_t) {
-  default_control_pipe.rx()->enqueueTransfer(nullptr, 0, nullptr);
+void usbHsControlReadStatus(uint32_t, void*) {
+  default_control_pipe.rx()->enqueueTransfer(nullptr, 0, nullptr, 0);
 }
 
-void usbHsControlWriteStatus(uint32_t) {
-  default_control_pipe.tx()->enqueueTransfer(nullptr, 0, nullptr);
+void usbHsControlWriteStatus(uint32_t, void* callback) {
+  default_control_pipe.tx()->enqueueTransfer(nullptr, 0, nullptr, 0);
+  if (callback != nullptr) {
+    (*(void (*)(void))(callback))();
+  }
 }
 
 void usbHsControlReadSendData(void* data, uint32_t length) {
   default_control_pipe.tx()->enqueueTransfer(
-      data, length, usbHsControlReadStatus);
+      data, length, usbHsControlReadStatus, 0);
+}
+
+void usbHsControlWriteReadData(
+    void* data, 
+    uint32_t length, 
+    void (*callback)(void)) {
+  default_control_pipe.rx()->enqueueTransfer(
+      data, length, usbHsControlWriteStatus, (void*)callback);
 }
 
 UsbDeviceDescriptor device_descriptor = {
@@ -538,10 +578,51 @@ EndpointTransferDescriptor* usbHsHandleGetDescriptor(UsbSetupData* setup) {
 
 void usbHsHandleSetAddress(uint8_t address) {
   USBHS_DEVICEADDR = (address << 25) + (1 << 24);
-  usbHsControlWriteStatus(0);
+  usbHsControlWriteStatus(0, nullptr);
 }
 
-uint8_t bulk_data[256];
+uint32_t bytes_to_send = 0;
+
+const int kBuffers = 31;
+const int kBufferSize = 4096;
+
+uint8_t buffers[kBuffers][kBufferSize];
+uint8_t current_byte = 0;
+
+uint32_t fillBuffer(uint8_t* buffer) {
+  int i=0;
+  for (; i < kBufferSize && bytes_to_send > 0; ++i, --bytes_to_send) {
+    buffer[i] = current_byte++;
+  }
+  return i;
+}
+
+void onBufferDone(uint32_t, void* data) {
+  uint8_t* buffer = (uint8_t*)data;
+  uint32_t sz = min(kBufferSize, bytes_to_send);
+  if (sz > 0) {
+    bytes_to_send -= sz;
+    if (!endpoints[3].enqueueTransfer(buffer, sz, onBufferDone, buffer)) {
+      Serial.println("Failed to send");
+    }
+  }
+}
+
+void onBytesToSend() {
+  Serial.print("Sending ");
+  Serial.println(bytes_to_send);
+
+  current_byte = 0;
+  for (int i=0; i < kBuffers; ++i) {
+    for (int j=0; j < kBufferSize; ++j) {
+      buffers[i][j] = current_byte++;
+    }
+  }
+
+  for (int i=0; i < kBuffers; ++i) {
+    onBufferDone(0, buffers[i]);
+  }
+}
 
 void usbHsHandleControlSetup(UsbSetupData* setup) {
   uint8_t request_type = (setup->bmRequestType >> 5) & 3;
@@ -559,9 +640,9 @@ void usbHsHandleControlSetup(UsbSetupData* setup) {
           Serial.println(setup->wValue);
           if (setup->wValue != 0) {
             // set configuration
-            endpoints[3].init(false, 512, EndpointType::BULK);
+            endpoints[3].init(true, 512, EndpointType::BULK);
           }
-          usbHsControlWriteStatus(0);
+          usbHsControlWriteStatus(0, nullptr);
           break;
         default:
           Serial.print("Unsupported request: ");
@@ -571,14 +652,10 @@ void usbHsHandleControlSetup(UsbSetupData* setup) {
       break;
     case USB_REQ_TYPE_VENDOR:
       if (setup->bRequest == 42) {
-        Serial.println("Start transfer");
-
-        for (int i=0; i < 256; ++i) {
-          bulk_data[i] = i;
-        }
-        endpoints[3].enqueueTransfer(bulk_data, 256, nullptr);
-
-        usbHsControlWriteStatus(0);
+        usbHsControlWriteReadData(
+            &bytes_to_send, 
+            sizeof(bytes_to_send),
+            onBytesToSend);
       } else {
         Serial.print("Vendor request: ");
         Serial.println(setup->bRequest);
@@ -599,16 +676,16 @@ extern "C" void usbhs_isr(void) {
   int complete = USBHS_EPCOMPLETE;
   USBHS_EPCOMPLETE = complete;
 
-  Serial.print("USB interrupt: ");
-  printBin(status);
+  /* Serial.print("USB interrupt: "); */
+  /* printBin(status); */
   /* Serial.print("EPSETUPSR: "); */
   /* printBin(USBHS_EPSETUPSR); */
 
   if (status & USBHS_USBSTS_UI) {
     /* Serial.print("EPSETUPSR: "); */
     /* printBin(setup); */
-    Serial.print("EPCOMPLETE: ");
-    printBin(complete);
+    /* Serial.print("EPCOMPLETE: "); */
+    /* printBin(complete); */
 
     if (setup & 1) {
       default_control_pipe.onSetup();
@@ -647,6 +724,7 @@ extern "C" void usbhs_isr(void) {
 
 }
 
+uint32_t t0 = millis();
 
 void setup() {
   /* SIM_SOPT1CFG |= SIM_SOPT1CFG_URWE; */
@@ -659,10 +737,14 @@ void setup() {
   pinMode(13, OUTPUT);
 }
 
+
 void loop() {
-  digitalWrite(13, HIGH);
-  delay(200);
-  digitalWrite(13, LOW);
-  delay(800);
+  uint32_t t = millis();
+
+  if (t - t0 > 1000) {
+    digitalWrite(13, !digitalRead(13));
+
+    t0 = t;
+  }
 }
 
