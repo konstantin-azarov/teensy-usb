@@ -57,9 +57,6 @@ void UsbHs::init() {
   // Disable DP/DM pulldown resistors
   USBPHY_ANACTRL &= ~(1<<10);
 
-  // Apparently it takes time
-  delay(10);
-
   // Power up PHY
   USBPHY_PWD = 0;
 
@@ -97,7 +94,10 @@ void UsbHs::init() {
 }
 
 bool UsbHs::enqueueTransfer(
-    int endpoint, const void* buffer, uint32_t length, bool callback) {
+    int endpoint_address, 
+    const void* buffer, 
+    uint32_t length, 
+    bool callback) {
   auto dtd = td_buffer_.allocate((uint8_t*)buffer, length);
 
   if (dtd == nullptr) {
@@ -107,6 +107,8 @@ bool UsbHs::enqueueTransfer(
   if (callback) {
     dtd->length |= kDtdCallbackBit;
   }
+
+  int endpoint = (endpoint_address & 0x7)*2 + (endpoint_address >> 7);
 
   auto* qh = &queue_heads_[endpoint];
 
@@ -168,7 +170,7 @@ void UsbHs::isr_() {
 
   Serial.print("ISR: ");
   Serial.println(status, HEX);
-  Serial.println(USBHS_PORTSC1 & USBHS_PORTSC_PR);
+  Serial.println(USBHS_PORTSC1, HEX);
 
   USBHS_USBSTS = status;
   USBHS_EPSETUPSR = setup;
@@ -222,7 +224,7 @@ void UsbHs::busReset_() {
   Serial.print("Flushed: ");
   Serial.println(cnt);
   
-//  USBHS_DEVICEADDR = 0;
+  USBHS_DEVICEADDR = 0;
 
   if (!(USBHS_PORTSC1 & USBHS_PORTSC_PR)) {
     Serial.println("Reset failed");
@@ -361,11 +363,11 @@ void UsbHs::handleSetup_(UsbSetupData* data) {
   if (processed) {
     Serial.println("Handshake");
     if (data->bmRequestType & 0x80) {
-      enqueueTransfer(0, nullptr, 0); 
+      enqueueTransfer(0x0, nullptr, 0, false); 
       Serial.println("Read handshake");
     } else {
       Serial.println("Write handshake");
-      enqueueTransfer(1, nullptr, 0);
+      enqueueTransfer(0x80, nullptr, 0, false);
     }
   } else {
     Serial.print("Unknown request: ");
@@ -383,14 +385,16 @@ bool UsbHs::handleGetDescriptor_(UsbSetupData* data) {
     case USB_DESC_DEVICE:
       Serial.println("Device descriptor");
       enqueueTransfer(
-          1, (uint8_t*)device_descriptor_, sizeof(UsbDeviceDescriptor));
+          0x80, (uint8_t*)device_descriptor_, sizeof(UsbDeviceDescriptor), false);
       return true;
     case USB_DESC_CONFIGURATION:
-      Serial.println("Configuration descriptor_buffer");
-      config = configurationDescriptor(desc_index);
+      Serial.println("Configuration descriptor");
+      Serial.println(desc_index);
+      config = configurationDescriptorByIndex_(desc_index);
+      Serial.println(min(data->wLength, config->wTotalLength));
       if (config != nullptr) {
         enqueueTransfer(
-            0x80, config, min(sizeof(config), config->wTotalLength));
+            0x80, config, min(data->wLength, config->wTotalLength), false);
       }
       return true;
     /* case USB_DESC_STRING: */
@@ -409,8 +413,11 @@ void UsbHs::handleSetAddress_(uint8_t address) {
   USBHS_DEVICEADDR = (address << 25) + (1 << 24);
 }
 
-bool UsbHs::handleSetConfiguration_(uint8_t index) {
-  auto config = configurationDescriptor(index);
+bool UsbHs::handleSetConfiguration_(uint8_t id) {
+  Serial.print("SetConfiguration ");
+  Serial.println(id);
+
+  auto config = configurationDescriptorById_(id);
   if (config == nullptr) {
     return false;
   }
@@ -426,22 +433,43 @@ bool UsbHs::handleSetConfiguration_(uint8_t index) {
         static_cast<EndpointType>(ep->bmAttributes & 0x3));
   }
 
+  Serial.println("Done");
+
   return true;
 }
 
-const UsbConfigurationDescriptor* UsbHs::configurationDescriptor(int idx) {
+const UsbConfigurationDescriptor* UsbHs::configurationDescriptorByIndex_(
+    int idx) {
   if (idx >= device_descriptor_->bNumConfigurations) {
     return nullptr;
   }
   auto config = reinterpret_cast<const UsbConfigurationDescriptor*>(
       config_descriptors_);
 
-  while (idx) {
+  while (idx--) {
     config = reinterpret_cast<const UsbConfigurationDescriptor*>(
         reinterpret_cast<const uint8_t*>(config) + config->wTotalLength);
   }
 
   return config;
+}
+
+const UsbConfigurationDescriptor* UsbHs::configurationDescriptorById_(
+    int id) {
+  int n = device_descriptor_->bNumConfigurations;
+
+  auto config = reinterpret_cast<const UsbConfigurationDescriptor*>(
+      config_descriptors_);
+
+  while (n--) {
+    if (config->bConfigurationValue == id) {
+      return config;
+    }
+    config = reinterpret_cast<const UsbConfigurationDescriptor*>(
+        reinterpret_cast<const uint8_t*>(config) + config->wTotalLength);
+  }
+
+  return nullptr;
 }
 
 /* int wcslen(const char16_t* str) { */

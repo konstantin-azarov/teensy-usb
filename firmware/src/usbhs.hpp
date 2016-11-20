@@ -57,7 +57,8 @@ class UsbHs {
     void handleSetAddress_(uint8_t address);
     bool handleSetConfiguration_(uint8_t index);
 
-    const UsbConfigurationDescriptor* configurationDescriptor(int idx);
+    const UsbConfigurationDescriptor* configurationDescriptorByIndex_(int idx);
+    const UsbConfigurationDescriptor* configurationDescriptorById_(int id);
 
   private:
     EndpointQueueHead queue_heads_[kNumEndpoints];

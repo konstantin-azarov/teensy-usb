@@ -16,9 +16,9 @@ UsbDeviceDescriptor device_descriptor = {
   0xFEED,
   0xBEEF,
   0x0001,
-  1,
-  2,
-  3,
+  0,
+  0,
+  0,
   1
 };
 
@@ -37,7 +37,7 @@ Configuration config = {
       sizeof(UsbInterfaceDescriptor) + sizeof(UsbEndpointDescriptor), // wTotalLength
     1, // bNumInterfaces
     1, // bConfigurationValue
-    4, // iConfiguration
+    0, // iConfiguration
     0xC0, // bmAttributes
     100 // bMaxPower
   },
@@ -95,7 +95,8 @@ void sendBuffer(int buffer_idx) {
 }
 
 void onBufferDone() {
-  sendBuffer(current_buffer++);
+  sendBuffer(current_buffer);
+  current_buffer = (current_buffer + 1) % kBuffers;
 }
 
 void onBytesToSend() {
