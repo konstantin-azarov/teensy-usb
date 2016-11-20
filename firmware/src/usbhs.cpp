@@ -1,6 +1,7 @@
 #include "Arduino.h"
 
 #include "usbhs.hpp"
+#include "debug_print.hpp"
 
 namespace usbhs {
 
@@ -21,7 +22,7 @@ UsbHs::UsbHs(
 }
 
 void UsbHs::init() {
-  Serial.println("Initializing USBHS");
+  DBG_LOG(USBHS) << "Initializing USBHS" << endl;
 
   // Enable USBHS access to MPU
   MPU_RGDAAC0 |= 0x30000000;
@@ -51,8 +52,7 @@ void UsbHs::init() {
     cnt++;
   }
 
-  Serial.print("PLL locked: ");
-  Serial.println(cnt);
+  DBG_LOG(USBHS) << "PLL locked: " << cnt << endl;
 
   // Disable DP/DM pulldown resistors
   USBPHY_ANACTRL &= ~(1<<10);
@@ -67,8 +67,7 @@ void UsbHs::init() {
     cnt++;
   }
   
-  Serial.print("USB reset: ");
-  Serial.println(cnt);
+  DBG_LOG(USBHS) << "USB reset: " << cnt << endl;
 
   // Enable interrupts
   NVIC_SET_PRIORITY(IRQ_USBHS, 113);
@@ -152,7 +151,7 @@ bool UsbHs::enqueueTransfer(
   USBHS_EPPRIME |= prime_bit; 
   while (USBHS_EPPRIME & prime_bit);
   if ((USBHS_EPSR & prime_bit) == 0) {
-    Serial.println("Error priming");
+    DBG_LOG(USBHS) << "Error priming" << endl;
     return false;
   }
 
@@ -168,9 +167,7 @@ void UsbHs::isr_() {
   int setup = USBHS_EPSETUPSR;
   int complete = USBHS_EPCOMPLETE;
 
-  Serial.print("ISR: ");
-  Serial.println(status, HEX);
-  Serial.println(USBHS_PORTSC1, HEX);
+  DBG_LOG(USBHS) << "ISR: " << hex(status) << hex(USBHS_PORTSC1) << endl;
 
   USBHS_USBSTS = status;
   USBHS_EPSETUPSR = setup;
@@ -195,7 +192,7 @@ void UsbHs::isr_() {
 
   
   if (status & USBHS_USBSTS_SEI) {
-    Serial.println("System error, reset");
+    DBG_LOG(USBHS) << "System error, reset" << endl;
     USBHS_USBCMD |= USBHS_USBCMD_RST;
   }
 
@@ -206,14 +203,12 @@ void UsbHs::isr_() {
   if (status & USBHS_USBSTS_PCI) {
     usb_speed_ = (USBHS_PORTSC1 >> 26) & 0x3;
 
-    Serial.print("USBHS connected, speed = ");
-    Serial.println(usb_speed_);
+    DBG_LOG(USBHS) << "USBHS connected, speed = " << usb_speed_ << endl;
   }
 }
 
 void UsbHs::busReset_() {
-  Serial.println("USBHS reset");
-  Serial.println(USBHS_PORTSC1 & USBHS_PORTSC_PR);
+  DBG_LOG(USBHS) << "USBHS reset" << endl;
 
   USBHS_EPSETUPSR = USBHS_EPSETUPSR;
   USBHS_EPCOMPLETE = USBHS_EPCOMPLETE;
@@ -221,13 +216,10 @@ void UsbHs::busReset_() {
   while (USBHS_EPPRIME) { cnt++; }
   USBHS_EPFLUSH = 0x000F000F;
 
-  Serial.print("Flushed: ");
-  Serial.println(cnt);
-  
   USBHS_DEVICEADDR = 0;
 
   if (!(USBHS_PORTSC1 & USBHS_PORTSC_PR)) {
-    Serial.println("Reset failed");
+    DBG_LOG(USBHS) << "Reset failed" << endl;
     USBHS_USBCMD |= USBHS_USBCMD_RST;
     return;
   }
@@ -236,16 +228,12 @@ void UsbHs::busReset_() {
 void UsbHs::configureEndpoint_(
     int endpoint, bool zlc, uint16_t max_packet_length, EndpointType type) {
   if (endpoint <= 1 && type != EndpointType::CONTROL) {
-    Serial.println("Invalid endpoint type");
+    DBG_LOG(USBHS) << "Invalid endpoint type" << endl;
     return;
   }
 
   auto* qh = &queue_heads_[endpoint];
   bool ios = type == EndpointType::CONTROL && (endpoint % 2) == 0;
-
-  Serial.print("Configured ");
-  Serial.println(endpoint);
-  Serial.println(ios);
 
   qh->cap = (zlc << 29) | (max_packet_length << 16) | (ios << 15);
  
@@ -302,8 +290,6 @@ void UsbHs::onComplete_(int endpoint) {
 }
 
 void UsbHs::onSetup_(int endpoint) {
-  Serial.println("OnSetup");
-
   uint32_t setup_buf_copy[4];
   auto* qh = &queue_heads_[endpoint];
 
@@ -330,8 +316,6 @@ void UsbHs::onSetup_(int endpoint) {
 }
 
 void UsbHs::handleSetup_(UsbSetupData* data) {
-  Serial.println("Setup");
-
   bool processed = true;
   uint8_t request_type = (data->bmRequestType >> 5) & 3;
   switch (request_type) {
@@ -361,17 +345,13 @@ void UsbHs::handleSetup_(UsbSetupData* data) {
   }
 
   if (processed) {
-    Serial.println("Handshake");
     if (data->bmRequestType & 0x80) {
       enqueueTransfer(0x0, nullptr, 0, false); 
-      Serial.println("Read handshake");
     } else {
-      Serial.println("Write handshake");
       enqueueTransfer(0x80, nullptr, 0, false);
     }
   } else {
-    Serial.print("Unknown request: ");
-    Serial.println(data->bmRequestType);
+    DBG_LOG(USBHS) <<  "Unknown request: " << data->bmRequestType << endl;
   }
 }
 
@@ -383,15 +363,11 @@ bool UsbHs::handleGetDescriptor_(UsbSetupData* data) {
 
   switch (desc_type) {
     case USB_DESC_DEVICE:
-      Serial.println("Device descriptor");
       enqueueTransfer(
           0x80, (uint8_t*)device_descriptor_, sizeof(UsbDeviceDescriptor), false);
       return true;
     case USB_DESC_CONFIGURATION:
-      Serial.println("Configuration descriptor");
-      Serial.println(desc_index);
       config = configurationDescriptorByIndex_(desc_index);
-      Serial.println(min(data->wLength, config->wTotalLength));
       if (config != nullptr) {
         enqueueTransfer(
             0x80, config, min(data->wLength, config->wTotalLength), false);
@@ -403,8 +379,7 @@ bool UsbHs::handleGetDescriptor_(UsbSetupData* data) {
     /*   sendStringDescriptor(string_descs[desc_index]); */
     /*   return true; */
     default:
-      Serial.print("Unsupported descriptor request: ");
-      Serial.println(desc_type);
+      DBG_LOG(USBHS) <<"Unsupported descriptor request: " << desc_type << endl;
       return false;
   }
 }
@@ -414,8 +389,7 @@ void UsbHs::handleSetAddress_(uint8_t address) {
 }
 
 bool UsbHs::handleSetConfiguration_(uint8_t id) {
-  Serial.print("SetConfiguration ");
-  Serial.println(id);
+  DBG_LOG(USBHS) << "SetConfiguration " << id << endl;
 
   auto config = configurationDescriptorById_(id);
   if (config == nullptr) {
@@ -432,8 +406,6 @@ bool UsbHs::handleSetConfiguration_(uint8_t id) {
         ep->wMaxPacketSize,
         static_cast<EndpointType>(ep->bmAttributes & 0x3));
   }
-
-  Serial.println("Done");
 
   return true;
 }

@@ -1,5 +1,8 @@
 #include "Arduino.h"
 
+#define DEBUG_PRINT 1
+
+#include "debug_print.hpp"
 #include "usbhs.hpp"
 #include "usb_types.hpp"
 
@@ -89,7 +92,7 @@ void sendBuffer(int buffer_idx) {
   if (sz > 0) {
     bytes_to_send -= sz;
     if (!usbhs_driver.enqueueTransfer(0x81, buffer, sz)) {
-      Serial.println("Failed to send");
+      DBG_LOG(Main) << "Failed to send" << endl;
     }
   }
 }
@@ -100,8 +103,7 @@ void onBufferDone() {
 }
 
 void onBytesToSend() {
-  Serial.print("Sending ");
-  Serial.println(bytes_to_send);
+  DBG_LOG(Main) << "Sending " << bytes_to_send << endl;
 
   current_byte = 0;
   for (int i=0; i < kBuffers; ++i) {
