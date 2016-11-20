@@ -5,9 +5,17 @@
 
 namespace usbhs {
 
+const int kMaxOutstandingTransfers = 32;
+const int kNumEndpoints = 8;
+
 const uint32_t kDtdCallbackBit = 1 << 16;
 
-UsbHs* g_instance;
+static UsbHs* g_instance;
+    
+static EndpointQueueHead queue_heads_[kNumEndpoints] 
+  __attribute__((aligned(4096)));
+static EndpointTransferDescriptor 
+      transfer_descriptors_[kMaxOutstandingTransfers];
 
 UsbHs::UsbHs(
     const UsbDeviceDescriptor* device_descriptor,

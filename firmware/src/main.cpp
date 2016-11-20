@@ -9,20 +9,20 @@
 using namespace usbhs;
 
 UsbDeviceDescriptor device_descriptor = {
-  sizeof(UsbDeviceDescriptor),
-  USB_DESC_DEVICE,
-  0x0200,
-  0xFF,
-  0,
-  0,
-  64,
-  0xFEED,
-  0xBEEF,
-  0x0001,
-  0,
-  0,
-  0,
-  1
+  sizeof(UsbDeviceDescriptor), // bLength
+  USB_DESC_DEVICE,  // bDescriptorType
+  0x0200,  // bcdUSB
+  0xFF,  // bDeviceClass
+  0, // bDeviceSubclass
+  0, // bDeviceProtocol
+  64, // bMaxPacketSize0
+  0xFEED, // idVendor
+  0xBEEF, // idProduct
+  0x0001, // bcdDevice
+  0,  // iManufacturer
+  0,  // iProduct
+  0,  // iSerialNumber
+  1   // bNumConfigurations
 };
 
 struct Configuration {
@@ -37,7 +37,8 @@ Configuration config = {
     sizeof(UsbConfigurationDescriptor), // bLength
     USB_DESC_CONFIGURATION, // bDescriptorType
     sizeof(UsbConfigurationDescriptor) + 
-      sizeof(UsbInterfaceDescriptor) + sizeof(UsbEndpointDescriptor), // wTotalLength
+      sizeof(UsbInterfaceDescriptor) + 
+      sizeof(UsbEndpointDescriptor), // wTotalLength
     1, // bNumInterfaces
     1, // bConfigurationValue
     0, // iConfiguration
@@ -67,83 +68,74 @@ Configuration config = {
   }
 };
 
-uint32_t bytes_to_send = 0;
 
+/* More buffers require more max outstanding transfers, which can for now be
+ * adjusted in usbhs.cpp */
 const int kBuffers = 31;
 const int kBufferSize = 4096;
 
-uint8_t buffers[kBuffers][kBufferSize];
-int current_buffer = 0;
-uint8_t current_byte = 0;
-
-extern UsbHs usbhs_driver;
-
-uint32_t fillBuffer(uint8_t* buffer) {
-  int i=0;
-  for (; i < kBufferSize && bytes_to_send > 0; ++i, --bytes_to_send) {
-    buffer[i] = current_byte++;
-  }
-  return i;
-}
-
-void sendBuffer(int buffer_idx) {
-  uint8_t* buffer = buffers[buffer_idx];
-  uint32_t sz = min(kBufferSize, bytes_to_send);
-  if (sz > 0) {
-    bytes_to_send -= sz;
-    if (!usbhs_driver.enqueueTransfer(0x81, buffer, sz)) {
-      DBG_LOG(Main) << "Failed to send" << endl;
-    }
-  }
-}
-
-void onBufferDone() {
-  sendBuffer(current_buffer);
-  current_buffer = (current_buffer + 1) % kBuffers;
-}
-
-void onBytesToSend() {
-  DBG_LOG(Main) << "Sending " << bytes_to_send << endl;
-
-  current_byte = 0;
-  for (int i=0; i < kBuffers; ++i) {
-    for (int j=0; j < kBufferSize; ++j) {
-      buffers[i][j] = current_byte++;
-    }
-  }
-
-  current_buffer = 0;
-  for (int i=0; i < kBuffers; ++i) {
-    sendBuffer(i);
-  }
-}
 
 class UsbHsClient : public usbhs::Callbacks {
-  virtual bool onControlSetup(const UsbSetupData* setup) {
-    if (setup->bRequest == 42) {
-      usbhs_driver.enqueueTransfer(0, (uint8_t*)&bytes_to_send, sizeof(bytes_to_send));
-      return true;
+  public:
+    UsbHsClient() : usbhs_driver_(&device_descriptor, &config, this) {
     }
 
-    return false;
-  }
-
-  virtual void onEndpointTransferComplete(int endpoint_address, uint32_t) {
-    switch (endpoint_address) {
-      case 0:
-        onBytesToSend();
-        break;
-      case 0x81:
-        onBufferDone();
-        break;
+    void setup() {
+      usbhs_driver_.init();
     }
-  }
+
+    virtual bool onControlSetup(const UsbSetupData* setup) {
+      if (setup->bRequest == 42) {
+        usbhs_driver_.enqueueTransfer(
+            0, (uint8_t*)&bytes_to_send_, sizeof(bytes_to_send_));
+        return true;
+      }
+
+      return false;
+    }
+
+    virtual void onEndpointTransferComplete(int endpoint_address, uint32_t) {
+      if (endpoint_address == 0) {
+        DBG_LOG(Main) << "Sending " << bytes_to_send_ << endl;
+
+        int current_byte = 0;
+        for (int i=0; i < kBuffers; ++i) {
+          for (int j=0; j < kBufferSize; ++j) {
+            buffers_[i][j] = current_byte++;
+          }
+        }
+
+        current_buffer_ = 0;
+        for (int i=0; i < kBuffers; ++i) {
+          sendBuffer_(i);
+        }
+      } else if (endpoint_address == 0x81) {
+        sendBuffer_(current_buffer_);
+        current_buffer_ = (current_buffer_ + 1) % kBuffers;
+      }
+    }
+
+  private:
+    void sendBuffer_(int buffer_idx) {
+      uint8_t* buffer = buffers_[buffer_idx];
+      uint32_t sz = min(kBufferSize, bytes_to_send_);
+      if (sz > 0) {
+        bytes_to_send_ -= sz;
+        if (!usbhs_driver_.enqueueTransfer(0x81, buffer, sz)) {
+          DBG_LOG(Main) << "Failed to send" << endl;
+        }
+      }
+    }
+
+  private:
+    UsbHs usbhs_driver_;
+
+    int current_buffer_ = 0;
+    uint32_t bytes_to_send_ = 0;
+    uint8_t buffers_[kBuffers][kBufferSize];
 };
 
-
 UsbHsClient usbhs_client;
-UsbHs usbhs_driver(&device_descriptor, &config, &usbhs_client);
-
 
 uint32_t t0 = millis();
 
@@ -153,7 +145,7 @@ void setup() {
 
   while (!Serial);
 
-  usbhs_driver.init();
+  usbhs_client.setup();
  
   pinMode(13, OUTPUT);
 }
